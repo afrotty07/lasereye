@@ -2,396 +2,364 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Laser Eyes AR</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- Three.js and Post Processing -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
-
-    <!-- MediaPipe -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laser Eyes AR - Three.js & MediaPipe</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
-        canvas { display: block; width: 100vw; height: 100vh; }
-        
-        /* UI Overlay */
-        #ui-layer {
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* The webcam video (hidden, we render it to canvas or just sit behind) 
+           We will mirror it with CSS to make it feel natural */
+        #input_video {
             position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            pointer-events: none;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); 
+            z-index: 0;
+        }
+
+        /* The Three.js Canvas */
+        #output_canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            transform: scaleX(-1); /* Match video mirror */
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00ff00;
+            font-size: 24px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border: 1px solid #00ff00;
+            border-radius: 8px;
             z-index: 10;
+            text-align: center;
         }
 
-        /* Start Screen */
-        #start-screen {
+        #controls {
             position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.85);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
             z-index: 20;
-            pointer-events: auto;
-            transition: opacity 0.5s;
         }
 
-        .glow-text {
-            text-shadow: 0 0 10px #ff0055, 0 0 20px #ff0055, 0 0 30px #ff0055;
+        button {
+            background: #ff0000;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            box-shadow: 0 0 15px #ff0000;
+            text-transform: uppercase;
         }
-
-        .loader {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #ff0055;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            display: none;
-            margin-top: 20px;
+        
+        button:hover {
+            background: #cc0000;
         }
-
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-
-        /* Hidden video element for MediaPipe processing */
-        #input-video {
-            position: absolute;
-            top: -9999px;
-            left: -9999px;
-            width: 1280px; 
-            height: 720px;
+        
+        .hidden {
+            display: none !important;
         }
     </style>
+    
+    <!-- MediaPipe Scripts (Global) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+    
+    <!-- Three.js as ES Module -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
 </head>
 <body>
 
-    <!-- Video Input (Hidden) -->
-    <video id="input-video" playsinline webkit-playsinline></video>
+    <div id="container">
+        <video id="input_video" playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        
+        <div id="loading">
+            INITIALIZING SYSTEM...<br>
+            <span style="font-size: 14px; color: #aaa;">(Please allow camera access)</span>
+        </div>
 
-    <!-- Start Screen -->
-    <div id="start-screen">
-        <h1 class="text-4xl md:text-6xl font-bold text-white mb-2 tracking-wider uppercase font-mono glow-text">Laser Eyes</h1>
-        <p class="text-gray-300 mb-8 text-center px-4">Face detection augmented reality demo.<br>Please allow camera access.</p>
-        
-        <button id="start-btn" class="bg-gradient-to-r from-red-600 to-pink-600 hover:from-red-500 hover:to-pink-500 text-white font-bold py-4 px-10 rounded-full shadow-lg transform transition hover:scale-105 ring-2 ring-white ring-opacity-50 backdrop-blur-md">
-            ACTIVATE
-        </button>
-        
-        <div id="loading-indicator" class="loader"></div>
-        <p id="status-text" class="text-gray-400 mt-4 text-sm font-mono hidden">Initializing Neural Net...</p>
+        <div id="controls" class="hidden">
+            <button id="toggleBtn">Toggle Lasers</button>
+        </div>
     </div>
 
-    <!-- Main Canvas Container is handled by Three.js -->
+    <script type="module">
+        import * as THREE from 'three';
 
-    <script>
         // --- Configuration ---
-        const CONFIG = {
-            cameraWidth: 1280,
-            cameraHeight: 720,
-            laserColor: 0xff0055,
-            laserLength: 50,
-            laserRadius: 0.15, // slightly thicker for better bloom
-            bloomStrength: 2.5,
-            bloomRadius: 0.4,
-            bloomThreshold: 0.1
+        const LANDMARK_IDS = {
+            LEFT_EYE: 468,  // Iris center
+            RIGHT_EYE: 473, // Iris center
+            NOSE_TIP: 1,
+            FOREHEAD: 10,
+            CHIN: 152,
+            LEFT_CHEEK: 234,
+            RIGHT_CHEEK: 454
         };
 
-        // --- Global Variables ---
-        let scene, camera, renderer, composer;
-        let videoTexture, videoMaterial, videoMesh;
-        let faceMesh; // MediaPipe instance
-        let cameraUtils; // MediaPipe camera
-        let lasers = []; // Array to hold the two laser meshes
+        // --- State ---
+        const state = {
+            lasersEnabled: false, // Changed to false initially
+            isLoaded: false
+        };
+
+        // --- DOM Elements ---
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const loadingElement = document.getElementById('loading');
+        const controlsElement = document.getElementById('controls');
+        const toggleBtn = document.getElementById('toggleBtn');
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
         
-        // DOM Elements
-        const videoElement = document.getElementById('input-video');
-        const startScreen = document.getElementById('start-screen');
-        const startBtn = document.getElementById('start-btn');
-        const loader = document.getElementById('loading-indicator');
-        const statusText = document.getElementById('status-text');
+        // Camera setup: We use an Orthographic camera to map 1:1 with the video feed roughly
+        // for easier 2D landmark overlay, but give it depth for the 3D lasers.
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 100; // Arbitrary, we will project logic based on this
 
-        // --- Initialization ---
+        const renderer = new THREE.WebGLRenderer({ 
+            canvas: canvasElement, 
+            alpha: true, // Transparent background so we can see the video
+            antialias: true 
+        });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
 
-        function initThreeJS() {
-            // 1. Scene Setup
-            scene = new THREE.Scene();
-
-            // 2. Camera
-            // We use an Orthographic camera for the background video to ensure 1:1 pixel mapping
-            // However, we need perspective for the lasers.
-            // Solution: A PerspectiveCamera that matches the video aspect ratio.
-            const aspect = window.innerWidth / window.innerHeight;
-            const fov = 60; // Approximate standard webcam FOV
-            camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 1000);
-            camera.position.z = 10; // Pull back slightly
-            
-            // 3. Renderer
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            document.body.appendChild(renderer.domElement);
-
-            // 4. Video Background Texture
-            videoTexture = new THREE.VideoTexture(videoElement);
-            videoTexture.minFilter = THREE.LinearFilter;
-            videoTexture.magFilter = THREE.LinearFilter;
-            videoTexture.format = THREE.RGBFormat;
-
-            // We create a plane that fills the view for the video background
-            // Calculating proper size to cover screen while maintaining aspect ratio
-            const planeGeometry = new THREE.PlaneGeometry(20, 20 * (9/16)); // Arbitrary large size, scale later
-            const planeMaterial = new THREE.MeshBasicMaterial({ 
-                map: videoTexture,
-                depthTest: false, // Render behind everything
-                depthWrite: false
-            });
-            videoMesh = new THREE.Mesh(planeGeometry, planeMaterial);
-            scene.add(videoMesh);
-
-            // 5. Laser Beams setup
-            // We create 2 cylinders
-            const laserGeo = new THREE.CylinderGeometry(CONFIG.laserRadius, CONFIG.laserRadius * 4, CONFIG.laserLength, 8);
-            // Rotate geometry so it points along Z axis
-            laserGeo.rotateX(-Math.PI / 2); 
-            // Move origin to the start of the cylinder
-            laserGeo.translate(0, 0, CONFIG.laserLength / 2); 
-
-            const laserMat = new THREE.MeshBasicMaterial({ 
-                color: CONFIG.laserColor,
-                transparent: true,
-                opacity: 0.8
-            });
-
-            const laserLeft = new THREE.Mesh(laserGeo, laserMat);
-            const laserRight = new THREE.Mesh(laserGeo, laserMat);
-            
-            // Start invisible
-            laserLeft.visible = false;
-            laserRight.visible = false;
-
-            scene.add(laserLeft);
-            scene.add(laserRight);
-            lasers = [laserLeft, laserRight];
-
-            // 6. Post Processing (Bloom)
-            const renderScene = new THREE.RenderPass(scene, camera);
-            
-            const bloomPass = new THREE.UnrealBloomPass(
-                new THREE.Vector2(window.innerWidth, window.innerHeight), 
-                CONFIG.bloomStrength, 
-                CONFIG.bloomRadius, 
-                CONFIG.bloomThreshold
-            );
-
-            composer = new THREE.EffectComposer(renderer);
-            composer.addPass(renderScene);
-            composer.addPass(bloomPass);
-
-            // Resize Handler
-            window.addEventListener('resize', onWindowResize, false);
-            onWindowResize(); // Initial sizing
-        }
-
-        function onWindowResize() {
+        // Handle Window Resize
+        window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-            composer.setSize(window.innerWidth, window.innerHeight);
-            
-            updateBackgroundSize();
-        }
+        });
 
-        function updateBackgroundSize() {
-            if (!videoMesh) return;
-            
-            // Calculate scale to mimic "object-fit: cover"
-            const imgAspect = CONFIG.cameraWidth / CONFIG.cameraHeight; // 16:9 usually
-            const screenAspect = window.innerWidth / window.innerHeight;
-            
-            // We need to determine how far away the background plane is to scale it correctly
-            // to fill the frustum.
-            const dist = camera.position.z;
-            const vFOV = THREE.Math.degToRad(camera.fov);
-            const height = 2 * Math.tan( vFOV / 2 ) * dist;
-            const width = height * screenAspect;
+        // --- Laser Objects ---
+        // We create a container for each eye that holds the laser beam and the glow sprite.
+        // This allows us to rotate the container to point the laser.
+        
+        function createLaser() {
+            const container = new THREE.Object3D();
 
-            // If screen is wider than video, fit width
-            if (screenAspect > imgAspect) {
-                videoMesh.scale.set(width, width / imgAspect, 1);
-            } else {
-                videoMesh.scale.set(height * imgAspect, height, 1);
-            }
-        }
+            // 1. The Beam (Cylinder)
+            // Cylinder geometry: radiusTop, radiusBottom, height, radialSegments
+            // We pivot it at the bottom so rotation works from the eye outward
+            const beamLen = 2000;
+            const beamGeo = new THREE.CylinderGeometry(2, 6, beamLen, 8);
+            beamGeo.translate(0, beamLen / 2, 0); // Shift so origin is at bottom
+            beamGeo.rotateX(-Math.PI / 2); // Point along Z axis initially
 
-        // --- MediaPipe Setup ---
-
-        async function initMediaPipe() {
-            statusText.innerText = "Loading Face Mesh Model...";
-            statusText.style.display = "block";
-
-            faceMesh = new FaceMesh({locateFile: (file) => {
-                return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
-            }});
-
-            faceMesh.setOptions({
-                maxNumFaces: 1,
-                refineLandmarks: true, // Critical for Iris tracking
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
+            const beamMat = new THREE.MeshBasicMaterial({ 
+                color: 0xff0000,
+                transparent: true,
+                opacity: 0.6,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
             });
+            const beam = new THREE.Mesh(beamGeo, beamMat);
+            container.add(beam);
 
-            faceMesh.onResults(onFaceResults);
-
-            cameraUtils = new Camera(videoElement, {
-                onFrame: async () => {
-                    await faceMesh.send({image: videoElement});
-                },
-                width: CONFIG.cameraWidth,
-                height: CONFIG.cameraHeight
+            // 2. The Core (Thinner, brighter beam inside)
+            const coreGeo = new THREE.CylinderGeometry(0.5, 0.5, beamLen, 8);
+            coreGeo.translate(0, beamLen / 2, 0);
+            coreGeo.rotateX(-Math.PI / 2);
+            const coreMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending
             });
+            const core = new THREE.Mesh(coreGeo, coreMat);
+            container.add(core);
+
+            // 3. The Eye Glow (Sprite)
+            const textureLoader = new THREE.TextureLoader();
+            // Creating a simple procedural glow texture via canvas to avoid external assets
+            const glowCanvas = document.createElement('canvas');
+            glowCanvas.width = 64;
+            glowCanvas.height = 64;
+            const ctx = glowCanvas.getContext('2d');
+            const grd = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            grd.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grd.addColorStop(0.4, 'rgba(255, 0, 0, 0.5)');
+            grd.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = grd;
+            ctx.fillRect(0, 0, 64, 64);
+            
+            const glowTex = new THREE.CanvasTexture(glowCanvas);
+            const spriteMat = new THREE.SpriteMaterial({ 
+                map: glowTex, 
+                color: 0xff0000, 
+                blending: THREE.AdditiveBlending 
+            });
+            const sprite = new THREE.Sprite(spriteMat);
+            sprite.scale.set(20, 20, 1);
+            container.add(sprite);
+
+            scene.add(container);
+            return container;
         }
 
-        // --- Main Loop Logic ---
+        const leftLaser = createLaser();
+        const rightLaser = createLaser();
 
-        // MediaPipe Landmarks to ThreeJS World Coordinates
+        // --- MediaPipe Face Mesh Setup ---
+        
+        // Coordinate mapping helper
+        // MediaPipe returns 0.0-1.0 coordinates. We need to map this to Three.js world units.
+        // Since we are using a PerspectiveCamera at z=100 looking at z=0, we can approximate the plane.
+        // A robust way is to use `vector.unproject` but simple scaling works well for visual effects overlays.
         function mapLandmarkToWorld(landmark, width, height) {
-            // MediaPipe: x (0-1), y (0-1), z (scaled by image width)
-            // ThreeJS: -width/2 to width/2
+            // Center is (0,0)
+            // x: 0 to 1 -> -w/2 to w/2
+            // y: 0 to 1 -> h/2 to -h/2 (inverted because DOM y is down, 3D y is up)
             
-            // 1. Get Normalized Device Coordinates (NDC)
-            const ndc = new THREE.Vector3(
-                (landmark.x - 0.5) * 2,  // -1 to 1
-                -(landmark.y - 0.5) * 2, // -1 to 1 (Y flipped)
-                -landmark.z              // Depth
+            // To make the tracking tight, we calculate the visible width/height at the target Z depth.
+            // For z=0 (face plane approx) and camera z=100:
+            const vFOV = THREE.MathUtils.degToRad(camera.fov);
+            const visibleHeight = 2 * Math.tan(vFOV / 2) * camera.position.z;
+            const visibleWidth = visibleHeight * camera.aspect;
+
+            return new THREE.Vector3(
+                (landmark.x - 0.5) * visibleWidth,
+                -(landmark.y - 0.5) * visibleHeight,
+                -landmark.z * visibleWidth * 0.5 // Depth approximation
             );
-
-            // This is an approximation. Because we are using a perspective camera
-            // and a background plane, we technically want to project these onto the plane
-            // or use the Z depth provided by MediaPipe to position in 3D space.
-            
-            // Simple Project/Unproject Approach:
-            // We want the lasers to originate from the eyes on the "video plane"
-            // but exist in 3D space.
-            
-            // Let's match the videoMesh scale.
-            const videoScaleX = videoMesh.scale.x;
-            const videoScaleY = videoMesh.scale.y;
-
-            const x = (landmark.x - 0.5) * videoScaleX;
-            const y = -(landmark.y - 0.5) * videoScaleY;
-            // Z needs to be close to the video plane (0) but slightly in front
-            const z = 0; 
-
-            return new THREE.Vector3(x, y, z);
         }
 
-        function onFaceResults(results) {
+        function onResults(results) {
+            if (!state.isLoaded) {
+                state.isLoaded = true;
+                loadingElement.classList.add('hidden');
+                controlsElement.classList.remove('hidden');
+            }
+
+            // Draw video frame? 
+            // Actually, the video element #input_video is playing in the background.
+            // We just clear the Three.js scene and render on top.
+            
             if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-                const landmarks = results.multiFaceLandmarks[0];
-                
-                // Iris indices: Left: 468, Right: 473
-                const leftEye = landmarks[468];
-                const rightEye = landmarks[473];
+                const landmarks = results.multiFaceLandmarks[0]; // Just take the first face
 
-                // Forehead index (approximate) to calculate face orientation
-                const forehead = landmarks[10];
-                const chin = landmarks[152];
-
-                // Update Left Laser
-                updateLaser(lasers[0], leftEye, forehead, chin);
+                // 1. Get Coordinates
+                const leftEyePos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_EYE], window.innerWidth, window.innerHeight);
+                const rightEyePos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_EYE], window.innerWidth, window.innerHeight);
                 
-                // Update Right Laser
-                updateLaser(lasers[1], rightEye, forehead, chin);
+                // 2. Calculate Face Orientation (Normal)
+                // We use 3 points to define the plane of the face:
+                // Center of eyes (midpoint), Nose, and something else or cross product of vectors.
+                // Improved method: Vector from EyeMid to Mouth (Vertical) cross Vector from EyeL to EyeR (Horizontal)
+                
+                const cheekL = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_CHEEK]);
+                const cheekR = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_CHEEK]);
+                const nose = mapLandmarkToWorld(landmarks[LANDMARK_IDS.NOSE_TIP]);
+                const forehead = mapLandmarkToWorld(landmarks[LANDMARK_IDS.FOREHEAD]);
+                const chin = mapLandmarkToWorld(landmarks[LANDMARK_IDS.CHIN]);
+
+                // Vector pointing "forward" out of the face
+                // Simple approximation: The cross product of (RightCheek - LeftCheek) and (Forehead - Chin)
+                const horizontalVec = new THREE.Vector3().subVectors(cheekR, cheekL).normalize();
+                const verticalVec = new THREE.Vector3().subVectors(forehead, chin).normalize();
+                
+                // Normal vector (pointing out of face)
+                const faceNormal = new THREE.Vector3().crossVectors(verticalVec, horizontalVec).normalize();
+
+                // 3. Update Lasers
+                if (state.lasersEnabled) {
+                    leftLaser.visible = true;
+                    rightLaser.visible = true;
+
+                    leftLaser.position.copy(leftEyePos);
+                    rightLaser.position.copy(rightEyePos);
+
+                    // Point lasers along the face normal
+                    // Create a target point far away along the normal
+                    const targetL = leftEyePos.clone().add(faceNormal.clone().multiplyScalar(1000));
+                    const targetR = rightEyePos.clone().add(faceNormal.clone().multiplyScalar(1000));
+
+                    leftLaser.lookAt(targetL);
+                    rightLaser.lookAt(targetR);
+                } else {
+                    leftLaser.visible = false;
+                    rightLaser.visible = false;
+                }
 
             } else {
-                // Hide lasers if no face
-                lasers[0].visible = false;
-                lasers[1].visible = false;
+                // No face detected
+                leftLaser.visible = false;
+                rightLaser.visible = false;
             }
 
-            // Trigger render after update
-            render();
+            renderer.render(scene, camera);
         }
 
-        function updateLaser(mesh, eyeLandmark, forehead, chin) {
-            mesh.visible = true;
-            
-            // Calculate Position
-            const pos = mapLandmarkToWorld(eyeLandmark);
-            mesh.position.copy(pos);
+        // --- Initialization ---
 
-            // Calculate Direction
-            // Simple approach: Look straight out of the Z axis relative to the face
-            // Or just shoot blindly towards the camera?
-            
-            // Let's calculate a vector coming out of the face.
-            // MediaPipe Z is depth relative to image plane.
-            
-            // Cool Effect: Make lasers follow the mouse? 
-            // No, let's make them shoot straight out of the eyes towards the viewer
-            // but slighty affected by face rotation.
-            
-            // For this demo, shooting purely along +Z (towards camera) looks most "Superman"
-            // Adding a slight offset based on head tilt makes it feel 3D.
-            
-            const lookAtTarget = new THREE.Vector3(pos.x, pos.y, pos.z + 50); // Look far ahead
-            mesh.lookAt(lookAtTarget);
-        }
+        const faceMesh = new FaceMesh({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+        }});
 
-        function render() {
-            // Optional: Pulse effect on bloom
-            const time = Date.now() * 0.005;
-            const pulse = Math.sin(time) * 0.5 + 1; // 0.5 to 1.5
-            
-            // Access the bloom pass (it's the second pass, index 1)
-            if(composer.passes[1]) {
-                 composer.passes[1].strength = CONFIG.bloomStrength * pulse;
-            }
+        faceMesh.setOptions({
+            maxNumFaces: 1,
+            refineLandmarks: true, // Important for accurate iris tracking
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
 
-            composer.render();
-        }
+        faceMesh.onResults(onResults);
 
-        // --- Application State ---
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await faceMesh.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
 
-        startBtn.addEventListener('click', async () => {
-            startBtn.style.display = 'none';
-            loader.style.display = 'block';
-            statusText.style.display = 'block';
+        // Start camera
+        cameraUtils.start().catch(err => {
+            console.error(err);
+            loadingElement.innerHTML = "Error accessing camera.<br>Please check permissions.";
+            loadingElement.style.borderColor = "red";
+            loadingElement.style.color = "red";
+        });
 
-            try {
-                initThreeJS();
-                await initMediaPipe();
-                
-                // Start Camera
-                await cameraUtils.start();
-                
-                // Hide start screen
-                startScreen.style.opacity = 0;
-                setTimeout(() => {
-                    startScreen.style.display = 'none';
-                }, 500);
-
-            } catch (error) {
-                console.error(error);
-                loader.style.display = 'none';
-                statusText.innerText = "Error: " + error.message + ". Please ensure camera permissions are allowed.";
-                statusText.style.color = "red";
-                startBtn.style.display = 'block';
-            }
+        // --- UI Controls ---
+        toggleBtn.addEventListener('click', () => {
+            state.lasersEnabled = !state.lasersEnabled;
         });
 
     </script>
