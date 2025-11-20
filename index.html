@@ -18,8 +18,6 @@
             height: 100vh;
         }
 
-        /* The webcam video (hidden, we render it to canvas or just sit behind) 
-           We will mirror it with CSS to make it feel natural */
         #input_video {
             position: absolute;
             top: 0;
@@ -31,7 +29,6 @@
             z-index: 0;
         }
 
-        /* The Three.js Canvas */
         #output_canvas {
             position: absolute;
             top: 0;
@@ -39,7 +36,7 @@
             width: 100%;
             height: 100%;
             z-index: 1;
-            transform: scaleX(-1); /* Match video mirror */
+            transform: scaleX(-1);
         }
 
         #loading {
@@ -63,6 +60,12 @@
             left: 50%;
             transform: translateX(-50%);
             z-index: 20;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 8px;
         }
 
         button {
@@ -82,17 +85,27 @@
             background: #cc0000;
         }
         
+        select {
+            background: #333;
+            color: white;
+            border: 1px solid #666;
+            padding: 10px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
         .hidden {
             display: none !important;
         }
     </style>
     
-    <!-- MediaPipe Scripts (Global) -->
+    <!-- MediaPipe Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
     
-    <!-- Three.js as ES Module -->
+    <!-- Three.js Import Map -->
     <script type="importmap">
         {
             "imports": {
@@ -113,7 +126,13 @@
         </div>
 
         <div id="controls" class="hidden">
-            <button id="toggleBtn">Toggle Lasers</button>
+            <button id="toggleBtn">Toggle Effect</button>
+            <select id="effectSelector">
+                <option value="none">None</option>
+                <option value="laser">Laser Eyes</option>
+                <option value="fire">Flame Eyes</option>
+                <option value="tears">Tears</option>
+            </select>
         </div>
     </div>
 
@@ -122,8 +141,10 @@
 
         // --- Configuration ---
         const LANDMARK_IDS = {
-            LEFT_EYE: 468,  // Iris center
-            RIGHT_EYE: 473, // Iris center
+            LEFT_EYE: 468,  
+            RIGHT_EYE: 473, 
+            LEFT_TEAR_START: 160, 
+            RIGHT_TEAR_START: 387, 
             NOSE_TIP: 1,
             FOREHEAD: 10,
             CHIN: 152,
@@ -133,8 +154,10 @@
 
         // --- State ---
         const state = {
-            lasersEnabled: false, // Changed to false initially
-            isLoaded: false
+            effectEnabled: false,
+            currentEffect: 'none', 
+            isLoaded: false,
+            lastFrameTime: performance.now() // Initialize correctly
         };
 
         // --- DOM Elements ---
@@ -143,112 +166,194 @@
         const loadingElement = document.getElementById('loading');
         const controlsElement = document.getElementById('controls');
         const toggleBtn = document.getElementById('toggleBtn');
+        const effectSelector = document.getElementById('effectSelector');
 
         // --- Three.js Setup ---
         const scene = new THREE.Scene();
-        
-        // Camera setup: We use an Orthographic camera to map 1:1 with the video feed roughly
-        // for easier 2D landmark overlay, but give it depth for the 3D lasers.
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.z = 100; // Arbitrary, we will project logic based on this
+        camera.position.z = 100;
 
         const renderer = new THREE.WebGLRenderer({ 
             canvas: canvasElement, 
-            alpha: true, // Transparent background so we can see the video
+            alpha: true,
             antialias: true 
         });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
 
-        // Handle Window Resize
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
 
-        // --- Laser Objects ---
-        // We create a container for each eye that holds the laser beam and the glow sprite.
-        // This allows us to rotate the container to point the laser.
-        
-        function createLaser() {
-            const container = new THREE.Object3D();
-
-            // 1. The Beam (Cylinder)
-            // Cylinder geometry: radiusTop, radiusBottom, height, radialSegments
-            // We pivot it at the bottom so rotation works from the eye outward
-            const beamLen = 2000;
-            const beamGeo = new THREE.CylinderGeometry(2, 6, beamLen, 8);
-            beamGeo.translate(0, beamLen / 2, 0); // Shift so origin is at bottom
-            beamGeo.rotateX(-Math.PI / 2); // Point along Z axis initially
-
-            const beamMat = new THREE.MeshBasicMaterial({ 
-                color: 0xff0000,
-                transparent: true,
-                opacity: 0.6,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false
-            });
-            const beam = new THREE.Mesh(beamGeo, beamMat);
-            container.add(beam);
-
-            // 2. The Core (Thinner, brighter beam inside)
-            const coreGeo = new THREE.CylinderGeometry(0.5, 0.5, beamLen, 8);
-            coreGeo.translate(0, beamLen / 2, 0);
-            coreGeo.rotateX(-Math.PI / 2);
-            const coreMat = new THREE.MeshBasicMaterial({ 
-                color: 0xffffff,
-                transparent: true,
-                opacity: 0.8,
-                blending: THREE.AdditiveBlending
-            });
-            const core = new THREE.Mesh(coreGeo, coreMat);
-            container.add(core);
-
-            // 3. The Eye Glow (Sprite)
-            const textureLoader = new THREE.TextureLoader();
-            // Creating a simple procedural glow texture via canvas to avoid external assets
+        // --- Utility Functions ---
+        function createGlowTexture(color = 'red') {
             const glowCanvas = document.createElement('canvas');
             glowCanvas.width = 64;
             glowCanvas.height = 64;
             const ctx = glowCanvas.getContext('2d');
             const grd = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-            grd.addColorStop(0, 'rgba(255, 255, 255, 1)');
-            grd.addColorStop(0.4, 'rgba(255, 0, 0, 0.5)');
+            grd.addColorStop(0, `rgba(255, 255, 255, 1)`);
+            
+            let c = '255, 255, 255';
+            if (color === 'red') c = '255, 0, 0';
+            if (color === 'blue') c = '0, 100, 255';
+            if (color === 'orange') c = '255, 100, 0';
+
+            grd.addColorStop(0.4, `rgba(${c}, 0.5)`);
             grd.addColorStop(1, 'rgba(0, 0, 0, 0)');
             ctx.fillStyle = grd;
             ctx.fillRect(0, 0, 64, 64);
-            
-            const glowTex = new THREE.CanvasTexture(glowCanvas);
+            return new THREE.CanvasTexture(glowCanvas);
+        }
+
+        const redGlowTexture = createGlowTexture('red');
+        const fireParticleTexture = createGlowTexture('orange');
+        const tearParticleTexture = createGlowTexture('blue');
+
+        // --- Create Effect Functions ---
+        function createLaserEffect() {
+            const container = new THREE.Object3D();
+
+            const beamLen = 2000;
+            const beamGeo = new THREE.CylinderGeometry(2, 6, beamLen, 8);
+            beamGeo.translate(0, beamLen / 2, 0);
+            beamGeo.rotateX(-Math.PI / 2);
+
+            const beamMat = new THREE.MeshBasicMaterial({ 
+                color: 0xff0000, transparent: true, opacity: 0.6,
+                blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            const beam = new THREE.Mesh(beamGeo, beamMat);
+            container.add(beam);
+
+            const coreGeo = new THREE.CylinderGeometry(0.5, 0.5, beamLen, 8);
+            coreGeo.translate(0, beamLen / 2, 0);
+            coreGeo.rotateX(-Math.PI / 2);
+            const coreMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff, transparent: true, opacity: 0.8,
+                blending: THREE.AdditiveBlending
+            });
+            const core = new THREE.Mesh(coreGeo, coreMat);
+            container.add(core);
+
             const spriteMat = new THREE.SpriteMaterial({ 
-                map: glowTex, 
-                color: 0xff0000, 
-                blending: THREE.AdditiveBlending 
+                map: redGlowTexture, color: 0xff0000, blending: THREE.AdditiveBlending 
             });
             const sprite = new THREE.Sprite(spriteMat);
             sprite.scale.set(20, 20, 1);
             container.add(sprite);
-
+            
+            container.visible = false;
             scene.add(container);
             return container;
         }
 
-        const leftLaser = createLaser();
-        const rightLaser = createLaser();
+        function createParticleSystem(texture, count, type) {
+            const particles = new THREE.BufferGeometry();
+            const positions = [];
+            const velocities = [];
+            const colors = [];
 
-        // --- MediaPipe Face Mesh Setup ---
-        
-        // Coordinate mapping helper
-        // MediaPipe returns 0.0-1.0 coordinates. We need to map this to Three.js world units.
-        // Since we are using a PerspectiveCamera at z=100 looking at z=0, we can approximate the plane.
-        // A robust way is to use `vector.unproject` but simple scaling works well for visual effects overlays.
-        function mapLandmarkToWorld(landmark, width, height) {
-            // Center is (0,0)
-            // x: 0 to 1 -> -w/2 to w/2
-            // y: 0 to 1 -> h/2 to -h/2 (inverted because DOM y is down, 3D y is up)
+            for (let i = 0; i < count; i++) {
+                positions.push(0, 0, 0);
+                if (type === 'fire') {
+                    velocities.push(
+                        (Math.random() - 0.5) * 0.5,
+                        Math.random() * 0.5 + 0.5,
+                        (Math.random() - 0.5) * 0.5
+                    );
+                    colors.push(1.0, Math.random() * 0.6 + 0.4, 0.0, Math.random());
+                } else { // tears
+                    velocities.push(
+                        (Math.random() - 0.5) * 0.2,
+                        -Math.random() * 0.8 - 0.5,
+                        (Math.random() - 0.5) * 0.2
+                    );
+                    colors.push(0.5, 0.7, 1.0, Math.random());
+                }
+            }
+            particles.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            particles.setAttribute('velocity', new THREE.Float32BufferAttribute(velocities, 3));
+            particles.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+
+            const material = new THREE.PointsMaterial({
+                size: type === 'fire' ? 10 : 6,
+                transparent: true,
+                blending: type === 'fire' ? THREE.AdditiveBlending : THREE.NormalBlending,
+                map: texture,
+                vertexColors: true,
+                depthWrite: false
+            });
+
+            const points = new THREE.Points(particles, material);
+            points.visible = false;
+            scene.add(points);
+            return points;
+        }
+
+        function updateParticles(particles, origin, deltaTime, type) {
+            if (!particles || !particles.visible) return;
+
+            const positions = particles.geometry.attributes.position.array;
+            const velocities = particles.geometry.attributes.velocity.array;
+            const colors = particles.geometry.attributes.color.array;
+            const count = positions.length / 3;
+
+            // Safety limit for logic loop to prevent hanging if count is huge
+            for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                const i4 = i * 4;
+
+                if (type === 'fire') {
+                    positions[i3 + 0] += velocities[i3 + 0] * deltaTime * 60;
+                    positions[i3 + 1] += velocities[i3 + 1] * deltaTime * 60;
+                    positions[i3 + 2] += velocities[i3 + 2] * deltaTime * 60;
+                    colors[i4 + 3] -= 0.04 * deltaTime * 60;
+
+                    if (colors[i4 + 3] <= 0 || positions[i3 + 1] > 40) {
+                        positions[i3 + 0] = 0; positions[i3 + 1] = 0; positions[i3 + 2] = 0;
+                        velocities[i3 + 0] = (Math.random() - 0.5) * 0.5;
+                        velocities[i3 + 1] = Math.random() * 0.5 + 0.5;
+                        velocities[i3 + 2] = (Math.random() - 0.5) * 0.5;
+                        colors[i4 + 3] = Math.random();
+                    }
+                } else { // tears
+                    velocities[i3 + 1] -= 0.05 * deltaTime * 60; // Gravity
+                    positions[i3 + 0] += velocities[i3 + 0] * deltaTime * 60;
+                    positions[i3 + 1] += velocities[i3 + 1] * deltaTime * 60;
+                    positions[i3 + 2] += velocities[i3 + 2] * deltaTime * 60;
+                    colors[i4 + 3] -= 0.02 * deltaTime * 60;
+
+                    if (colors[i4 + 3] <= 0 || positions[i3 + 1] < -60) {
+                        positions[i3 + 0] = 0; positions[i3 + 1] = 0; positions[i3 + 2] = 0;
+                        velocities[i3 + 0] = (Math.random() - 0.5) * 0.2;
+                        velocities[i3 + 1] = -Math.random() * 0.8 - 0.5;
+                        velocities[i3 + 2] = (Math.random() - 0.5) * 0.2;
+                        colors[i4 + 3] = Math.random();
+                    }
+                }
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+            particles.geometry.attributes.color.needsUpdate = true;
             
-            // To make the tracking tight, we calculate the visible width/height at the target Z depth.
-            // For z=0 (face plane approx) and camera z=100:
+            // Move the whole system to the eye position
+            if (origin) particles.position.copy(origin);
+        }
+
+        // --- Instantiate Effects ---
+        const leftLaser = createLaserEffect();
+        const rightLaser = createLaserEffect();
+        
+        const leftFlameParticles = createParticleSystem(fireParticleTexture, 100, 'fire');
+        const rightFlameParticles = createParticleSystem(fireParticleTexture, 100, 'fire');
+        
+        const leftTearParticles = createParticleSystem(tearParticleTexture, 50, 'tears');
+        const rightTearParticles = createParticleSystem(tearParticleTexture, 50, 'tears');
+
+        // --- Coordinate Mapping ---
+        function mapLandmarkToWorld(landmark) {
             const vFOV = THREE.MathUtils.degToRad(camera.fov);
             const visibleHeight = 2 * Math.tan(vFOV / 2) * camera.position.z;
             const visibleWidth = visibleHeight * camera.aspect;
@@ -256,89 +361,107 @@
             return new THREE.Vector3(
                 (landmark.x - 0.5) * visibleWidth,
                 -(landmark.y - 0.5) * visibleHeight,
-                -landmark.z * visibleWidth * 0.5 // Depth approximation
+                -landmark.z * visibleWidth * 0.5
             );
         }
 
+        // --- Main Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const now = performance.now();
+            let deltaTime = (now - state.lastFrameTime) / 1000;
+            state.lastFrameTime = now;
+
+            // Prevent huge time steps if tab was backgrounded or just started
+            if (deltaTime > 0.1) deltaTime = 0.1;
+
+            if (state.effectEnabled) {
+                if (state.currentEffect === 'fire') {
+                    updateParticles(leftFlameParticles, null, deltaTime, 'fire');
+                    updateParticles(rightFlameParticles, null, deltaTime, 'fire');
+                } else if (state.currentEffect === 'tears') {
+                    updateParticles(leftTearParticles, null, deltaTime, 'tears');
+                    updateParticles(rightTearParticles, null, deltaTime, 'tears');
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+        // Start loop
+        animate();
+
+        // --- MediaPipe Logic ---
         function onResults(results) {
             if (!state.isLoaded) {
                 state.isLoaded = true;
                 loadingElement.classList.add('hidden');
                 controlsElement.classList.remove('hidden');
             }
-
-            // Draw video frame? 
-            // Actually, the video element #input_video is playing in the background.
-            // We just clear the Three.js scene and render on top.
             
+            // 1. Hide Everything First
+            [leftLaser, rightLaser, leftFlameParticles, rightFlameParticles, leftTearParticles, rightTearParticles].forEach(obj => {
+                if(obj) obj.visible = false;
+            });
+
             if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-                const landmarks = results.multiFaceLandmarks[0]; // Just take the first face
+                const landmarks = results.multiFaceLandmarks[0];
 
-                // 1. Get Coordinates
-                const leftEyePos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_EYE], window.innerWidth, window.innerHeight);
-                const rightEyePos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_EYE], window.innerWidth, window.innerHeight);
-                
-                // 2. Calculate Face Orientation (Normal)
-                // We use 3 points to define the plane of the face:
-                // Center of eyes (midpoint), Nose, and something else or cross product of vectors.
-                // Improved method: Vector from EyeMid to Mouth (Vertical) cross Vector from EyeL to EyeR (Horizontal)
-                
-                const cheekL = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_CHEEK]);
-                const cheekR = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_CHEEK]);
-                const nose = mapLandmarkToWorld(landmarks[LANDMARK_IDS.NOSE_TIP]);
-                const forehead = mapLandmarkToWorld(landmarks[LANDMARK_IDS.FOREHEAD]);
-                const chin = mapLandmarkToWorld(landmarks[LANDMARK_IDS.CHIN]);
+                // Get Positions
+                const leftEyePos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_EYE]);
+                const rightEyePos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_EYE]);
+                const leftTearPos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_TEAR_START]);
+                const rightTearPos = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_TEAR_START]);
 
-                // Vector pointing "forward" out of the face
-                // Simple approximation: The cross product of (RightCheek - LeftCheek) and (Forehead - Chin)
-                const horizontalVec = new THREE.Vector3().subVectors(cheekR, cheekL).normalize();
-                const verticalVec = new THREE.Vector3().subVectors(forehead, chin).normalize();
-                
-                // Normal vector (pointing out of face)
-                const faceNormal = new THREE.Vector3().crossVectors(verticalVec, horizontalVec).normalize();
+                // 2. Show Only Active Effect
+                if (state.effectEnabled) {
+                    if (state.currentEffect === 'laser') {
+                        const cheekL = mapLandmarkToWorld(landmarks[LANDMARK_IDS.LEFT_CHEEK]);
+                        const cheekR = mapLandmarkToWorld(landmarks[LANDMARK_IDS.RIGHT_CHEEK]);
+                        const forehead = mapLandmarkToWorld(landmarks[LANDMARK_IDS.FOREHEAD]);
+                        const chin = mapLandmarkToWorld(landmarks[LANDMARK_IDS.CHIN]);
 
-                // 3. Update Lasers
-                if (state.lasersEnabled) {
-                    leftLaser.visible = true;
-                    rightLaser.visible = true;
+                        const horizontalVec = new THREE.Vector3().subVectors(cheekR, cheekL).normalize();
+                        const verticalVec = new THREE.Vector3().subVectors(forehead, chin).normalize();
+                        const faceNormal = new THREE.Vector3().crossVectors(verticalVec, horizontalVec).normalize();
+                        
+                        leftLaser.visible = true;
+                        rightLaser.visible = true;
+                        leftLaser.position.copy(leftEyePos);
+                        rightLaser.position.copy(rightEyePos);
+                        
+                        const targetL = leftEyePos.clone().add(faceNormal.clone().multiplyScalar(1000));
+                        const targetR = rightEyePos.clone().add(faceNormal.clone().multiplyScalar(1000));
+                        leftLaser.lookAt(targetL);
+                        rightLaser.lookAt(targetR);
 
-                    leftLaser.position.copy(leftEyePos);
-                    rightLaser.position.copy(rightEyePos);
+                    } else if (state.currentEffect === 'fire') {
+                        leftFlameParticles.visible = true;
+                        rightFlameParticles.visible = true;
+                        leftFlameParticles.position.copy(leftEyePos);
+                        rightFlameParticles.position.copy(rightEyePos);
 
-                    // Point lasers along the face normal
-                    // Create a target point far away along the normal
-                    const targetL = leftEyePos.clone().add(faceNormal.clone().multiplyScalar(1000));
-                    const targetR = rightEyePos.clone().add(faceNormal.clone().multiplyScalar(1000));
-
-                    leftLaser.lookAt(targetL);
-                    rightLaser.lookAt(targetR);
-                } else {
-                    leftLaser.visible = false;
-                    rightLaser.visible = false;
+                    } else if (state.currentEffect === 'tears') {
+                        leftTearParticles.visible = true;
+                        rightTearParticles.visible = true;
+                        leftTearParticles.position.copy(leftTearPos);
+                        rightTearParticles.position.copy(rightTearPos);
+                    }
                 }
-
-            } else {
-                // No face detected
-                leftLaser.visible = false;
-                rightLaser.visible = false;
             }
-
-            renderer.render(scene, camera);
         }
 
-        // --- Initialization ---
-
+        // --- Setup Camera & Mesh ---
         const faceMesh = new FaceMesh({locateFile: (file) => {
             return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
         }});
 
         faceMesh.setOptions({
             maxNumFaces: 1,
-            refineLandmarks: true, // Important for accurate iris tracking
+            refineLandmarks: true,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
         });
-
         faceMesh.onResults(onResults);
 
         const cameraUtils = new Camera(videoElement, {
@@ -349,7 +472,6 @@
             height: 720
         });
 
-        // Start camera
         cameraUtils.start().catch(err => {
             console.error(err);
             loadingElement.innerHTML = "Error accessing camera.<br>Please check permissions.";
@@ -359,7 +481,11 @@
 
         // --- UI Controls ---
         toggleBtn.addEventListener('click', () => {
-            state.lasersEnabled = !state.lasersEnabled;
+            state.effectEnabled = !state.effectEnabled;
+        });
+
+        effectSelector.addEventListener('change', (event) => {
+            state.currentEffect = event.target.value;
         });
 
     </script>
